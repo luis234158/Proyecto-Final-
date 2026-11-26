@@ -18,7 +18,7 @@ Videos de la prueba: [`media/demo_clasificacion_1.mp4`](media/demo_clasificacion
 2. [Dataset y etiquetado en Roboflow](#2-dataset-y-etiquetado-en-roboflow)
 3. [Entrenamiento en Google Colab](#3-entrenamiento-en-google-colab)
 4. [Detector en el PC (`detector.py`)](#4-detector-en-el-pc-detectorpy)
-5. [Comunicación PC → ESP32](#5-comunicación-pc--esp32)
+5. [Comunicación PC → ESP32 (protocolo serial)](#5-comunicación-pc--esp32-protocolo-serial)
 6. [Parte mecánica: banda transportadora y rampa clasificadora](#6-parte-mecánica-banda-transportadora-y-rampa-clasificadora)
 7. [El dron: por qué no se pudo cambiar la placa por un ESP32](#7-el-dron-por-qué-no-se-pudo-cambiar-la-placa-por-un-esp32)
 8. [Estructura del repositorio](#8-estructura-del-repositorio)
@@ -30,22 +30,22 @@ Videos de la prueba: [`media/demo_clasificacion_1.mp4`](media/demo_clasificacion
 El trabajo se divide en dos partes. El PC se encarga de "ver" y el ESP32 de "mover":
 
 ```
- Cámara ──► PC (detector.py + best.pt) ──► clase de la moneda ──► ESP32
-                                                                    │
-                                     ┌──────────────────────────────┴──────────────┐
-                                     ▼                                             ▼
-                        Motorreductor (banda)                         Servo (rampa giratoria)
-                        lleva la moneda hasta el final                apunta la rampa al vaso
-                                                                      de esa denominación
+ Cámara ──► PC: detector.py + best.pt (YOLO11) ──► comandos por USB serial (115200) ──► ESP32
+                                                                                         │
+                                            ┌────────────────────────────────────────────┴──────┐
+                                            ▼                                                   ▼
+                              Driver + motorreductor (banda)                     Servo (rampa giratoria)
+                              B,<vel> / T,<vel>,<ms>                             C,<clase>  →  vaso de esa moneda
 ```
 
-1. La moneda se pone sobre la banda y la cámara la captura.
-2. En el PC, `detector.py` corre el modelo YOLO entrenado (`best.pt`) sobre cada cuadro de video y obtiene la **clase** (la denominación) y la **confianza** de la detección.
-3. El PC le envía la clase al ESP32.
-4. El ESP32 gira el **servo** para orientar la rampa hacia el vaso de esa moneda y activa el **motorreductor** para que la banda la lleve hasta el final.
-5. La moneda cae de la banda a la rampa y se desliza por gravedad hasta su vaso.
+1. Con la tecla **`p`** la banda arranca y el sistema queda **buscando** monedas.
+2. Cuando una moneda entra a la **zona de detección** (franja amarilla en el centro de la imagen), el PC **para la banda**.
+3. Con la banda quieta, el PC toma **8 cuadros seguidos** y hace una **votación** para decidir qué moneda es.
+4. Le manda la clase al ESP32 (`C,500`, por ejemplo). El ESP32 gira el **servo** al ángulo del vaso de esa moneda y responde `OK,C` cuando el servo ya llegó.
+5. Recién ahí el PC manda **`T,30,3000`**: banda al 30 % durante 3 s. La moneda cae de la banda a la rampa y se desliza a su vaso.
+6. La banda vuelve a arrancar y se repite. En pantalla se van contando las monedas clasificadas y el **total en pesos**.
 
-Se decidió correr YOLO en el PC y no en el ESP32 porque el microcontrolador no tiene la memoria ni la capacidad de cómputo para ejecutar una red de detección a una velocidad útil. El ESP32 solo recibe una orden sencilla y mueve los actuadores.
+YOLO corre en el PC y no en el ESP32 porque el microcontrolador no tiene la memoria ni la capacidad de cómputo para ejecutar una red de detección a una velocidad útil. El ESP32 solo recibe órdenes de texto sencillas y mueve los actuadores.
 
 ---
 
@@ -61,7 +61,7 @@ Se decidió correr YOLO en el PC y no en el ESP32 porque el microcontrolador no 
    - diferentes posiciones y rotaciones,
    - cambios de luz (luz del salón, sombra, reflejos),
    - varias monedas en la misma imagen.
-3. **Etiquetar (Annotate):** se dibuja una caja (*bounding box*) alrededor de cada moneda y se le asigna su clase. Cada denominación es una clase distinta, y cada clase corresponde a un vaso del clasificador.
+3. **Etiquetar (Annotate):** se dibuja una caja (*bounding box*) alrededor de cada moneda y se le asigna su clase. Cada denominación es una clase distinta: **`50`, `100`, `200`, `500` y `1000`**. Los nombres tienen que ser exactamente esos, porque `detector.py` los usa para sumar el total en pesos y el ESP32 para escoger el vaso. Cualquier otra clase se manda al vaso de rechazo.
 4. **Dividir el dataset** en *train / valid / test* (Roboflow lo sugiere, típicamente ~70 / 20 / 10 %).
 5. **Preprocesamiento y aumentos (Generate):**
    - *Preprocessing:* auto-orient y resize (por ejemplo a 640×640, el tamaño de entrada de YOLO).
@@ -132,32 +132,132 @@ Se usa `best.pt` (los pesos de la época con mejor mAP en validación) y no `las
 
 ## 4. Detector en el PC (`detector.py`)
 
-El `best.pt` se copia al PC y se corre desde **VS Code** con `detector.py` (carpeta [`detector/`](detector/)).
-
-Requisitos:
+Código: [`detector/detector.py`](detector/detector.py). Corre en **VS Code** con el `best.pt` en la misma carpeta.
 
 ```bash
 pip install ultralytics opencv-python pyserial
+python detector.py
 ```
 
-La lógica del detector es:
+> Antes de correrlo hay que **cerrar el Monitor Serie** del Arduino IDE, porque el puerto COM solo lo puede usar un programa a la vez.
 
-1. Abrir la cámara con OpenCV.
-2. Cargar el modelo con `YOLO("best.pt")`.
-3. Correr la inferencia sobre cada cuadro y dibujar las cajas con su clase y su confianza (es lo que se ve en la pantalla del portátil en el video).
-4. Cuando la detección es confiable (por encima de un umbral de confianza y estable durante algunos cuadros, para evitar mandar órdenes por detecciones falsas), enviar la clase al ESP32.
+### 4.1 Parámetros de configuración
+
+| Parámetro | Valor | Para qué sirve |
+|---|---|---|
+| `PUERTO` | `"COM9"` | Puerto donde está conectado el ESP32 |
+| `CAMARA` | `1` | Índice de la cámara (se abre con `cv2.CAP_DSHOW`, el backend de Windows) |
+| `VELOCIDAD` | `30` | Velocidad de la banda en % mientras busca monedas |
+| `TIEMPO_ENTREGA` | `3000` | ms que avanza la banda para que la moneda caiga a la rampa |
+| `FRAMES_VOTO` | `8` | Cuadros que se analizan para confirmar la moneda |
+| `ZONA` | `(0.35, 0.0, 0.65, 1.0)` | Zona de detección: franja vertical entre el 35 % y el 65 % del ancho de la imagen |
+
+### 4.2 Detección y filtros (`detectar`)
+
+El modelo se corre con:
+
+```python
+model(frame, conf=0.6, iou=0.4, agnostic_nms=True, verbose=False)
+```
+
+- **`conf=0.6`**: solo se aceptan detecciones con 60 % de confianza o más.
+- **`iou=0.4`**: umbral de la supresión de no-máximos (NMS) para eliminar cajas repetidas sobre el mismo objeto.
+- **`agnostic_nms=True`**: el NMS se hace sin importar la clase. Así una misma moneda no puede salir detectada como dos monedas distintas al tiempo (por ejemplo `200` y `500` encima).
+
+Después de YOLO se aplican **dos filtros geométricos** para quitar falsos positivos:
+
+1. **Relación de aspecto** `0.75 < ancho/alto < 1.33`: una moneda es circular, entonces su caja debe ser casi cuadrada. Una caja muy alargada no es una moneda.
+2. **Área relativa** `≤ 8 %` de la imagen: una moneda sobre la banda ocupa poco espacio en la imagen. Si la caja es más grande (por ejemplo, la mano), se descarta.
+
+Las cajas descartadas se dibujan en **gris**, las monedas válidas en **verde** y, si el modelo devuelve una clase que no está en `{"50", "100", "200", "500", "1000"}`, se toma como **`rechazo`** y se dibuja en **rojo**.
+
+### 4.3 Máquina de estados
+
+El programa principal funciona con 4 estados:
+
+```
+            p                 moneda en la zona                 8 cuadros y ≥ 4 votos
+ PAUSA ──────────► BUSCANDO ───────────────────► CONFIRMANDO ──────────────────────► ENTREGANDO
+   ▲     p           ▲  banda a VELOCIDAD          banda en 0          │              C,<clase> → OK,C
+   └─────────────────┤                                                 │              T,<vel>,3000
+                     │◄────────────── menos de 4 votos ────────────────┘                   │
+                     └◄───────────────────── pasan 3 s + 0,2 s ────────────────────────────┘
+```
+
+- **PAUSA**: banda detenida, espera la tecla `p`.
+- **BUSCANDO**: banda a `VELOCIDAD`. Apenas aparece una moneda dentro de la zona, manda `B,0` (parar) y pasa a CONFIRMANDO.
+- **CONFIRMANDO**: durante 8 cuadros guarda en cada cuadro la clase de la moneda con **mayor confianza** dentro de la zona. Al final:
+  - si hay **al menos 4 votos** (la mitad), la clase final es **la más votada** (`Counter(votos).most_common(1)`). La votación evita que un cuadro mal clasificado mande la moneda al vaso equivocado.
+  - si hay menos de 4 votos (la moneda no se vio bien), se considera falsa alarma y la banda sigue buscando.
+- **ENTREGANDO**: manda `C,<clase>`, **espera el `OK,C`** (el servo ya está apuntando al vaso) y luego manda `T,<vel>,3000`. Suma la moneda al contador y al total en pesos, y cuando pasa el tiempo de entrega vuelve a BUSCANDO.
+
+Esperar el `OK,C` antes de mover la banda es importante: si la banda avanzara antes de que el servo llegue, la moneda podría caer con la rampa todavía girando.
+
+### 4.4 Interfaz y teclas
+
+En la ventana se muestran el estado actual, la última moneda, la cantidad de monedas clasificadas, el **total en pesos** y el conteo por denominación.
+
+| Tecla | Acción |
+|---|---|
+| `p` | Iniciar / pausar la banda |
+| `+` / `-` | Subir / bajar la velocidad de 5 en 5 % (entre 20 y 100 %) |
+| `q` | Salir: para la banda y deja el servo en 90° antes de cerrar |
+
+La clase `ESP32` del script también permite **probar sin la placa conectada**: si no puede abrir el puerto, sigue funcionando y solo imprime los comandos en la consola.
 
 ---
 
-## 5. Comunicación PC → ESP32
+## 5. Comunicación PC → ESP32 (protocolo serial)
 
-El ESP32 está conectado al portátil por cable USB, y el PC le manda la clase detectada por el **puerto serial**. El ESP32:
+El ESP32 está conectado al portátil por USB y se comunica por **serial a 115200 baudios**. Cada comando es **una línea de texto terminada en `\n`**, y el ESP32 responde a cada uno:
 
-- lee la clase que llega,
-- mueve el **servo** al ángulo del vaso que corresponde a esa moneda,
-- activa el **motorreductor** para que la banda avance y la moneda caiga.
+| Comando | Qué hace | Respuesta |
+|---|---|---|
+| `B,<vel>` | Banda continua a `vel` % (0 = parar) | `OK,B` |
+| `T,<vel>,<ms>` | Banda a `vel` % durante `ms` milisegundos y se detiene sola | `OK,T` y al terminar `FIN,T` |
+| `A,<ángulo>` | Servo a un ángulo de 0 a 180° | `OK,A` cuando el servo ya llegó |
+| `C,<clase>` | Servo a la posición del vaso de esa moneda (`50`, `100`, `200`, `500`, `1000` o `rechazo`) | `OK,C` cuando el servo ya llegó |
+| `E` | Prueba de vida | `E,OK` |
+| (cualquier otra cosa) | — | `ERR,<línea>` |
 
-El código del ESP32 está en [`esp32/`](esp32/).
+**Arranque (handshake):** al encender, el ESP32 manda `LISTO`. `detector.py` espera esa palabra hasta 4 s. Si no llega (por ejemplo, porque el ESP32 ya estaba encendido antes de abrir el puerto), manda `E` y espera `E,OK` para confirmar que la placa sí responde.
+
+### 5.1 Código del ESP32 (`esp32_clasificador.ino`)
+
+Código: [`esp32_clasificador/esp32_clasificador.ino`](esp32_clasificador/esp32_clasificador.ino). Se sube desde el Arduino IDE con la placa **ESP32 Dev Module**, y no necesita librerías extra.
+
+**Conexiones (ESP32 clásico, DevKit):**
+
+| Pin ESP32 | Va a |
+|---|---|
+| GPIO 25 | ENA / PWMA del driver del motor (velocidad, PWM) |
+| GPIO 26 | IN1 del driver (sentido) |
+| GPIO 27 | IN2 del driver (sentido) |
+| GPIO 18 | Señal del servo |
+| GND | GND común del ESP32, del driver y del servo |
+
+- El servo y el motor se alimentan con **su propia fuente**, no con el 3V3 del ESP32. Solo se unen las tierras.
+- Se recomiendan **resistencias de 10 kΩ a GND** en IN1, IN2 y ENA, para que el motor no arranque solo mientras el ESP32 se está reiniciando (en ese momento los pines quedan flotando).
+
+**PWM con el periférico LEDC del ESP32:**
+
+| Salida | Frecuencia | Resolución | Por qué |
+|---|---|---|---|
+| Motor (canal 0) | 20 kHz | 10 bits (0–1023) | 20 kHz está por encima de lo que escucha el oído, así el motor no "pita" |
+| Servo (canal 2) | 50 Hz | 14 bits | El servo necesita un periodo de 20 ms. Con 14 bits se logra buena resolución en el ancho de pulso |
+
+Se usan los canales 0 y 2 porque pertenecen a **temporizadores distintos**, y las dos frecuencias no pueden compartir el mismo temporizador. El código funciona con el core de ESP32 **2.x y 3.x** (la API de `ledc` cambió entre versiones).
+
+**Control del servo:** el ángulo se convierte a ancho de pulso entre 500 y 2400 µs, y luego a ciclo útil:
+
+$$
+t_{pulso} = 500 + (2400 - 500)\cdot\frac{\theta}{180}\;[\mu s], \qquad
+duty = t_{pulso}\cdot\frac{2^{14}-1}{20000}
+$$
+
+Para saber cuándo responder `OK,A` / `OK,C`, el ESP32 estima el tiempo que tarda el servo en llegar: **150 ms + 4 ms por cada grado** que se mueve.
+
+**Todo es sin bloqueo:** el `loop()` no usa `delay()`. Los tiempos de la banda (`T`) y las respuestas del servo se controlan con `millis()`, entonces el ESP32 sigue leyendo comandos mientras la banda avanza o el servo se mueve. Además, las líneas demasiado largas (más de 47 caracteres) se descartan completas para que no se procese un comando cortado.
 
 ---
 
@@ -171,7 +271,7 @@ El código del ESP32 está en [`esp32/`](esp32/).
 |---|---|
 | Estructura | Base y soportes verticales en **MDF** cortado. Los soportes sostienen el cuerpo de la banda a una altura suficiente para que la moneda caiga sobre la rampa. |
 | Banda | Cinta negra que gira entre dos rodillos, uno en cada extremo. Uno de ellos es el **rodillo motriz** y el otro es el **rodillo conducido**. |
-| Motor | **Motorreductor amarillo tipo TT** (motor DC con caja reductora), montado en un **soporte impreso en 3D** (azul) atornillado a la base. |
+| Motor | **Motorreductor amarillo tipo TT** (motor DC con caja reductora), montado en un **soporte impreso en 3D** (azul) atornillado a la base. Se maneja con un **driver de puente H** (velocidad por PWM en ENA y sentido con IN1/IN2). |
 | Transmisión | **Engranajes rectos impresos en 3D** que llevan el giro del motorreductor al eje del rodillo motriz. |
 
 **¿Por qué motorreductor y engranajes?** La banda tiene que moverse **lento y con fuerza**. Si va rápido, la moneda sale disparada y no cae en la rampa. Si no tiene torque, la fricción de la banda contra los rodillos la frena. El motorreductor TT ya baja las RPM del motor con su caja interna, y el par de engranajes ajusta todavía más la relación:
@@ -194,14 +294,26 @@ Es decir, con un engranaje conducido más grande que el piñón del motor se gan
 
 ### 6.2 Rampa clasificadora (mecanismo para que cada moneda caiga en su vaso)
 
-Al final de la banda hay una **rampa inclinada** (canal blanco) montada sobre un **servomotor**, que está dentro de la caja blanca. Los **vasos están acomodados en arco alrededor del servo**, uno por denominación.
+Al final de la banda hay una **rampa inclinada** (canal blanco) montada sobre un **servomotor**, que está dentro de la caja blanca. Los **vasos están acomodados en arco alrededor del servo**: uno por cada denominación y uno más para las monedas de **rechazo**.
+
+Cada vaso tiene su ángulo de servo, que se calibró en el código del ESP32:
+
+| Moneda | Ángulo del servo |
+|---|---|
+| \$50 | 12° |
+| \$100 | 46° |
+| \$200 | 74° |
+| \$500 | 112° |
+| \$1000 | 148° |
+| Rechazo (o clase desconocida) | 176° |
+
+Al encender, el servo arranca en **90°**.
 
 Funcionamiento:
 
-1. Con la clase que manda el PC, el ESP32 gira el servo a un **ángulo fijo** asignado a esa moneda (cada vaso tiene su ángulo).
-2. La moneda llega al final de la banda y **cae sobre la parte alta de la rampa**.
+1. Con la clase que manda el PC (`C,<clase>`), el ESP32 gira el servo al ángulo de ese vaso.
+2. Cuando el servo ya llegó, la banda avanza 3 s y la moneda **cae sobre la parte alta de la rampa**.
 3. La moneda **se desliza por gravedad** a lo largo de la rampa y sale por el extremo que apunta al vaso correcto.
-4. El servo queda listo para reposicionarse con la siguiente moneda.
 
 **Condición para que la moneda deslice:** la rampa necesita una inclinación θ mayor que el ángulo de fricción entre la moneda y el material de la rampa:
 
@@ -243,14 +355,22 @@ Al analizar la placa se concluyó que **no era viable reemplazarla**, por estas 
 ## 8. Estructura del repositorio
 
 ```
-clasificador-monedas-yolo-esp32/
 ├── README.md
 ├── entrenamiento/
-│   └── entrenamiento_colab.py     # celdas del cuaderno de Colab (Roboflow + YOLO11)
-├── detector/                      # detector.py: detector en el PC (VS Code) + envío por serial
-├── esp32/                         # código del ESP32: banda (motorreductor) y servo
-├── img/                           # fotos y GIF del README
-└── media/                         # videos de la prueba
+│   └── entrenamiento_colab.py        # celdas del cuaderno de Colab (Roboflow + YOLO11)
+├── detector/
+│   └── detector.py                   # detector en el PC (VS Code) + comandos por serial
+├── esp32_clasificador/
+│   └── esp32_clasificador.ino        # control de banda (driver + motorreductor) y servo
+├── img/                              # fotos y GIF del README
+└── media/                            # videos de la prueba
 ```
 
-> `best.pt` no se sube al repo si pesa mucho. Se puede dejar en *Releases* o descargar desde Colab.
+**Para correr el proyecto:**
+
+1. Subir `esp32_clasificador.ino` al ESP32 (Arduino IDE → *ESP32 Dev Module*).
+2. Si es necesario, calibrar los ángulos de los vasos en `POSICIONES[]`.
+3. Poner `best.pt` en la carpeta `detector/` y ajustar `PUERTO` y `CAMARA` en `detector.py`.
+4. Cerrar el Monitor Serie, correr `python detector.py` y presionar **`p`** para arrancar.
+
+> `best.pt` no está en el repo (está en el `.gitignore`). Se descarga desde Colab al final del entrenamiento.
