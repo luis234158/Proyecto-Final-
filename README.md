@@ -105,12 +105,13 @@ dataset = version.download("yolov11")
 ```python
 from ultralytics import YOLO
 
-model = YOLO("yolo11n.pt")          # versión nano: liviana y rápida para correr en un portátil
+model = YOLO("yolo11s.pt")          # versión small: más precisa que la nano y aún rápida en un portátil
 model.train(
     data=f"{dataset.location}/data.yaml",
     epochs=100,
     imgsz=640,
     batch=16,
+    patience=30,                     # si en 30 épocas no mejora, para antes (early stopping)
 )
 ```
 
@@ -127,6 +128,16 @@ files.download("runs/detect/train/weights/best.pt")
 ```
 
 Se usa `best.pt` (los pesos de la época con mejor mAP en validación) y no `last.pt` (la última época).
+
+**Modelo usado en este proyecto:** [`detector/best.pt`](detector/best.pt)
+
+| Dato | Valor |
+|---|---|
+| Arquitectura base | YOLO11s (`yolo11s.pt`) |
+| Dataset | `Detector-de-monedas`, versión 2 (Roboflow) |
+| Clases | `50`, `100`, `200`, `500`, `1000` |
+| Épocas / imgsz / batch / patience | 100 / 640 / 16 / 30 |
+| Fecha de entrenamiento | 27 de octubre de 2026 |
 
 ---
 
@@ -359,7 +370,8 @@ Al analizar la placa se concluyó que **no era viable reemplazarla**, por estas 
 ├── entrenamiento/
 │   └── entrenamiento_colab.py        # celdas del cuaderno de Colab (Roboflow + YOLO11)
 ├── detector/
-│   └── detector.py                   # detector en el PC (VS Code) + comandos por serial
+│   ├── detector.py                   # detector en el PC (VS Code) + comandos por serial
+│   └── best.pt                       # modelo YOLO11s entrenado
 ├── esp32_clasificador/
 │   └── esp32_clasificador.ino        # control de banda (driver + motorreductor) y servo
 ├── img/                              # fotos y GIF del README
@@ -370,7 +382,5 @@ Al analizar la placa se concluyó que **no era viable reemplazarla**, por estas 
 
 1. Subir `esp32_clasificador.ino` al ESP32 (Arduino IDE → *ESP32 Dev Module*).
 2. Si es necesario, calibrar los ángulos de los vasos en `POSICIONES[]`.
-3. Poner `best.pt` en la carpeta `detector/` y ajustar `PUERTO` y `CAMARA` en `detector.py`.
-4. Cerrar el Monitor Serie, correr `python detector.py` y presionar **`p`** para arrancar.
-
-> `best.pt` no está en el repo (está en el `.gitignore`). Se descarga desde Colab al final del entrenamiento.
+3. Ajustar `PUERTO` y `CAMARA` en `detector.py` (el `best.pt` ya está en la carpeta `detector/`).
+4. Cerrar el Monitor Serie y, desde la carpeta `detector/`, correr `python detector.py`. Presionar **`p`** para arrancar.

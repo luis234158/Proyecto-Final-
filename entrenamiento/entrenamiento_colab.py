@@ -13,19 +13,20 @@
 from roboflow import Roboflow
 
 rf = Roboflow(api_key="TU_API_KEY")          # no subir la API key real a GitHub
-project = rf.workspace("TU_WORKSPACE").project("TU_PROYECTO")
-version = project.version(1)
+project = rf.workspace("TU_WORKSPACE").project("detector-de-monedas")   # nombre del proyecto en Roboflow
+version = project.version(2)
 dataset = version.download("yolov11")
 
-# %% 4. Entrenar (transfer learning desde yolo11n preentrenado)
+# %% 4. Entrenar (transfer learning desde yolo11s preentrenado)
 from ultralytics import YOLO
 
-model = YOLO("yolo11n.pt")
+model = YOLO("yolo11s.pt")
 results = model.train(
     data=f"{dataset.location}/data.yaml",
     epochs=100,
     imgsz=640,
     batch=16,
+    patience=30,
 )
 
 # %% 5. Validar y ver métricas (mAP50, mAP50-95, matriz de confusión)
